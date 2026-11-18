@@ -1,0 +1,122 @@
+#include "MascaraMultiPainel.h"
+#include <algorithm>
+#include <cmath>\n#include <cstdio>
+using namespace ffglex;
+
+enum Param : unsigned int { P_QUANTIDADE, P_ESPACAMENTO, P_FORMA, P_BASE_PAINEL };
+static CFFGLPluginInfo PluginInfo(
+    PluginFactory<MascaraMultiPainel>, "MMP1", "Máscara MultiPainel",
+    2, 1, 1, 0, FF_EFFECT,
+    "Máscara geométrica com painéis independentes", "Máscara MultiPainel para Resolume");
+
+static const char* kVertex = R"GLSL(#version 410 core
+layout(location=0) in vec4 vPosition;
+layout(location=1) in vec2 vUV;
+out vec2 uv;
+void main(){ gl_Position=vPosition; uv=vUV; }
+)GLSL";
+
+static const char* kFragment = R"GLSL(#version 410 core
+uniform sampler2D InputTexture;
+uniform vec2 MaxUV;
+uniform float PanelWidth[8];
+uniform float PanelHeight[8];
+uniform float PanelY[8];
+uniform float PanelCount;
+uniform float Gap;
+uniform float Shape;
+in vec2 uv;
+out vec4 fragColor;
+float sdRoundBox(vec2 p, vec2 b, float r){ vec2 q=abs(p)-b+vec2(r); return length(max(q,0.0))+min(max(q.x,q.y),0.0)-r; }
+float sdShape(vec2 p, vec2 halfSize){
+    int s=int(Shape+0.5);
+    if(s==0) return sdRoundBox(p,halfSize,0.002);
+    if(s==1) return sdRoundBox(p,halfSize,min(halfSize.x,halfSize.y)*0.16);
+    if(s==2) return length(p)-min(halfSize.x,halfSize.y);
+    if(s==3) return length(p/halfSize)-1.0;
+    if(s==4) return max(abs(p.x)/halfSize.x + p.y/halfSize.y - 1.0, -p.y/halfSize.y - 1.0);
+    if(s==5) return max(abs(p.x)/halfSize.x - p.y/halfSize.y - 1.0, p.y/halfSize.y - 1.0);
+    if(s==6) return max(abs(p.x)+abs(p.y)-min(halfSize.x,halfSize.y), max(abs(p.x)-halfSize.x,abs(p.y)-halfSize.y));
+    if(s==7) return max(max(abs(p.x),abs(p.y))*0.866025+abs(p.y)*0.5-halfSize.x, abs(p.y)-halfSize.y);
+    if(s==8) { float d=length(p/halfSize)-1.0; return max(d, -p.y/halfSize.y); }
+    return max(min(abs(p.x)-halfSize.x*0.36, abs(p.y)-halfSize.y*0.36), max(abs(p.x)-halfSize.x,abs(p.y)-halfSize.y));
+}
+void main(){
+    float widths[8]; float total=0.0;
+    for(int i=0;i<8;i++){ widths[i]=clamp(PanelWidth[i],0.015,0.5); if(float(i)<PanelCount) total+=widths[i]; }
+    total+=max(0.0,PanelCount-1.0)*Gap;
+    float x=-total*0.5;
+    float alpha=0.0;
+    for(int i=0;i<8;i++){
+        if(float(i)<PanelCount){
+            float w=widths[i]; float h=clamp(PanelHeight[i],0.02,1.0);
+            float center=x+w*0.5;
+            vec2 p=vec2(uv.x-0.5-center, uv.y-clamp(PanelY[i],0.0,1.0));
+            vec2 hs=vec2(w,h)*0.5;
+            float d=sdShape(p,hs);
+            float aa=max(fwidth(d),0.0005);
+            alpha=max(alpha,1.0-smoothstep(-aa,aa,d));
+            x+=w+Gap;
+        }
+    }
+    vec4 c=texture(InputTexture,uv*MaxUV);
+    fragColor=vec4(c.rgb*alpha,c.a*alpha);
+}
+)GLSL";
+
+MascaraMultiPainel::MascaraMultiPainel(){
+    SetMinInputs(1); SetMaxInputs(1);
+    widths_.fill(0.14f); heights_.fill(0.60f); vertical_.fill(0.50f);
+    widths_[2]=0.22f; heights_[2]=0.82f;
+    SetOptionParamInfo(P_QUANTIDADE,"Qtd paineis",8,count_);
+    const char* qtd[] = {"1 painel","2 paineis","3 paineis","4 paineis","5 paineis","6 paineis","7 paineis","8 paineis"};
+    for(unsigned i=0;i<8;i++) SetParamElementInfo(P_QUANTIDADE,i,qtd[i],float(i+1));
+    SetParamDisplayName(P_QUANTIDADE,"Quantidade de painéis",false);
+    SetParamInfof(P_ESPACAMENTO,"Espacamento",FF_TYPE_STANDARD);
+    SetParamDisplayName(P_ESPACAMENTO,"Espaçamento entre painéis",false);
+    SetOptionParamInfo(P_FORMA,"Forma",10,shape_);
+    const char* formas[] = {"Retângulo","Retângulo arredondado","Círculo","Oval","Triângulo para cima","Triângulo para baixo","Losango","Hexágono","Arco","Cruz"};
+    for(unsigned i=0;i<10;i++) SetParamElementInfo(P_FORMA,i,formas[i],float(i));
+    for(unsigned i=0;i<kPanels;i++){
+        char name[64];
+        snprintf(name,sizeof(name),"P%u largura",i+1); SetParamInfof(P_BASE_PAINEL+i*3,name,FF_TYPE_STANDARD);
+        char display[64]; snprintf(display,sizeof(display),"Painel %u - Largura",i+1); SetParamDisplayName(P_BASE_PAINEL+i*3,display,false);
+        snprintf(name,sizeof(name),"P%u altura",i+1); SetParamInfof(P_BASE_PAINEL+i*3+1,name,FF_TYPE_STANDARD);
+        snprintf(display,sizeof(display),"Painel %u - Altura",i+1); SetParamDisplayName(P_BASE_PAINEL+i*3+1,display,false);
+        snprintf(name,sizeof(name),"P%u posicao Y",i+1); SetParamInfof(P_BASE_PAINEL+i*3+2,name,FF_TYPE_STANDARD);
+        snprintf(display,sizeof(display),"Painel %u - Posição vertical",i+1); SetParamDisplayName(P_BASE_PAINEL+i*3+2,display,false);
+    }
+}
+FFResult MascaraMultiPainel::InitGL(const FFGLViewportStruct* vp){
+    if(!shader_.Compile(kVertex,kFragment)||!quad_.Initialise()){ DeInitGL(); return FF_FAIL; }
+    return CFFGLPlugin::InitGL(vp);
+}
+FFResult MascaraMultiPainel::ProcessOpenGL(ProcessOpenGLStruct* pGL){
+    if(!pGL||pGL->numInputTextures<1||!pGL->inputTextures[0]) return FF_FAIL;
+    ScopedShaderBinding bind(shader_.GetGLID()); ScopedSamplerActivation sampler(0);
+    Scoped2DTextureBinding texture(pGL->inputTextures[0]->Handle);
+    shader_.Set("InputTexture",0);
+    const auto maxUV=GetMaxGLTexCoords(*pGL->inputTextures[0]); shader_.Set("MaxUV",maxUV.s,maxUV.t);
+    glUniform1fv(shader_.FindUniform("PanelWidth[0]"),8,widths_.data());
+    glUniform1fv(shader_.FindUniform("PanelHeight[0]"),8,heights_.data());
+    glUniform1fv(shader_.FindUniform("PanelY[0]"),8,vertical_.data());
+    shader_.Set("PanelCount",count_);
+    shader_.Set("Gap",gap_); shader_.Set("Shape",shape_);
+    quad_.Draw(); return FF_SUCCESS;
+}
+FFResult MascaraMultiPainel::DeInitGL(){ shader_.FreeGLResources(); quad_.Release(); return FF_SUCCESS; }
+FFResult MascaraMultiPainel::SetFloatParameter(unsigned int i,float v){
+    v=std::clamp(v,0.0f,1.0f);
+    if(i==P_QUANTIDADE) count_=std::clamp(std::round(v),1.0f,8.0f); else if(i==P_ESPACAMENTO) gap_=v*0.12f; else if(i==P_FORMA) shape_=std::clamp(std::round(v),0.0f,9.0f);
+    else if(i>=P_BASE_PAINEL&&i<P_BASE_PAINEL+24){ unsigned p=(i-P_BASE_PAINEL)/3; unsigned a=(i-P_BASE_PAINEL)%3; if(a==0) widths_[p]=0.015f+v*0.485f; else if(a==1) heights_[p]=0.02f+v*0.98f; else vertical_[p]=v; }
+    else return FF_FAIL; return FF_SUCCESS;
+}
+float MascaraMultiPainel::GetFloatParameter(unsigned int i){
+    if(i==P_QUANTIDADE)return count_; if(i==P_ESPACAMENTO)return gap_/0.12f; if(i==P_FORMA)return shape_;
+    if(i>=P_BASE_PAINEL&&i<P_BASE_PAINEL+24){unsigned p=(i-P_BASE_PAINEL)/3;unsigned a=(i-P_BASE_PAINEL)%3;return a==0?(widths_[p]-0.015f)/0.485f:a==1?(heights_[p]-0.02f)/0.98f:vertical_[p];}
+    return 0.0f;
+}
+
+
+
+
